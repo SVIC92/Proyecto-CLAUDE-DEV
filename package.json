@@ -1,0 +1,25 @@
+{
+  "name": "task-manager-api",
+  "version": "1.0.0",
+  "description": "API REST de gestion de tareas (CRUD, validacion, filtros/orden/estadisticas) con Node.js, Express y Supabase",
+  "main": "src/server.js",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "jest --runInBand",
+    "test:watch": "jest --runInBand --watch"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.110.1",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "jest": "^30.4.2",
+    "nodemon": "^3.1.14",
+    "supertest": "^7.2.2"
+  }
+}
