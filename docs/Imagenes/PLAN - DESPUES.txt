@@ -1,0 +1,174 @@
+Plan: Implementar el Gestor de Tareas según docs/spec.md
+
+Contexto
+
+docs/spec.md define la especificación completa de una API de gestión de tareas
+(CRUD, validación, endpoint con lógica propia de filtro/orden/estadísticas, tests
+mínimos y README). El proyecto está actualmente vacío (solo existen CLAUDE.md y
+docs/spec.md), así que este plan cubre la implementación completa desde cero.
+
+Decisiones ya tomadas con el usuario (no se vuelven a discutir):
+- Stack: Node.js + Express, JavaScript plano (sin TypeScript).
+- Persistencia: Supabase (Postgres gestionado) vía @supabase/supabase-js,
+configurado por variables de entorno (SUPABASE_URL, SUPABASE_KEY) en .env.
+El README debe explicar cómo crear el proyecto Supabase y la tabla desde cero
+(no se asume que ya existe).
+- Tests: mockean el repositorio/cliente de Supabase (no hay tests de integración
+contra una instancia real), usando Jest + Supertest.
+- Gestor de paquetes: pnpm para instalar dependencias y correr scripts
+(pnpm install, pnpm dev, pnpm test). Si pnpm no está disponible en el
+entorno, se instala primero (npm install -g pnpm) antes de continuar.
+
+Arquitectura
+
+Capas con dependencia unidireccional: routes → controllers → services → repositories → supabaseClient.
+validators y utils son transversales, sin dependencias hacia arriba.
+
+CLAUDE.md, README.md, .env.example, .env (gitignored), .gitignore, package.json, jest.config.js
+docs/spec.md                          (ya existe)
+db/schema.sql                         (DDL de la tabla tasks)
+src/
+  app.js                              (configura Express, sin listen())
+  server.js                           (arranca el servidor)
+  config/env.js                       (carga/valida dotenv, única fuente de env vars)
+  lib/supabaseClient.js               (singleton createClient)
+  repositories/taskRepository.js      (única capa que habla con supabase-js)
+  validators/taskValidator.js         (valida body create/update)
+  validators/queryValidator.js        (valida query params status/priority/sort/order)
+  services/taskService.js             (orquesta validación + repo + reglas de negocio)
+  services/taskStatsService.js        (calcula stats en memoria, sin red)
+  controllers/taskController.js       (handlers Express)
+  routes/taskRoutes.js                (define /tasks; /tasks/stats ANTES de /tasks/:id)
+  middlewares/errorHandler.js         (ApiError -> status+JSON; errores no controlados -> 500)
+  utils/ApiError.js                   (statusCode + message + field)
+  utils/dateUtils.js                  (isValidIsoDate, isPastDate)
+tests/
+  unit/taskValidator.test.js, queryValidator.test.js, taskStatsService.test.js, taskRepository.test.js
+  integration/tasks.create.test.js, tasks.crud.test.js, tasks.query.test.js
+  helpers/mockSupabase.js             (helper de builder encadenado, solo para taskRepository.test.js)
+
+Puntos de diseño clave
+
+- Mock de datos: la mayoría de tests mockean taskRepository completo con
+jest.mock (nivel alto, simple). Solo tests/unit/taskRepository.test.js mockea
+el builder encadenado de supabaseClient (vía tests/helpers/mockSupabase.js)
+para verificar que errores de Supabase se traducen a ApiError 500.
+- Validación: a mano, sin librería (Joi/Zod), por el tamaño acotado de la spec
+y la necesidad de mensajes 400 con field específico. taskValidator.validateCreate
+y validateUpdate nunca copian id, created_at ni updated_at del body —
+así el id es inmutable desde el punto de entrada más temprano.
+- Filtro/orden/stats en memoria: taskService pide siempre todas las tareas a
+taskRepository.getAllTasks() y filtra/ordena/calcula en JS plano (dataset pequeño,
+sin requisito de escalabilidad). queryValidator rechaza con 400 cualquier
+status/priority/sort/order fuera de enum antes de tocar el service —
+nunca se interpreta un filtro inválido como lista vacía.
+  - Orden por due_date: tareas sin fecha van siempre al final.
+  - Orden por priority: mapeado a rango numérico (low=0, medium=1, high=2), no alfabético.
+  - overdue en stats: due_date < hoy (estrictamente) y status != done; hoy no cuenta como vencida.
+- Ruta /tasks/stats antes de /tasks/:id en taskRoutes.js para que Express no
+interprete stats como un id.
+- PATCH con body vacío {}: se trata como no-op válido → 200 con la tarea sin
+modificar (o 404 si el id no existe), no 400. Documentado explícitamente en el
+README como decisión de diseño.
+- Esquema SQL (db/schema.sql): tabla tasks con id uuid default (pgcrypto),
+title varchar(120) not null, description varchar(1000), status/priority con
+CHECK de enum y defaults, due_date date, created_at/updated_at timestamptz,
+más un trigger que actualiza updated_at en cada UPDATE. Los CHECK de Postgres
+son defensa en profundidad; la validación real y los mensajes 400 siempre vienen de
+taskValidator.js — nunca se expone un error crudo de Postgres al cliente.
+
+Tests mínimos requeridos por la spec (mapeo exacto)
+
+1. Happy path creación (201) — tests/integration/tasks.create.test.js: mock de
+taskRepository.createTask resolviendo una tarea completa; POST /tasks con solo
+title → 201 con id, defaults y timestamps.
+2. Happy path del endpoint propio — tests/integration/tasks.query.test.js: mock
+de taskRepository.getAllTasks con fixture fijo (tareas con distinto status/priority,
+una vencida, una con due_date = hoy, una sin fecha) → GET /tasks/stats devuelve
+conteos exactos; GET /tasks?status=&sort=&order= devuelve el arreglo filtrado/ordenado
+correctamente.
+3. Caso de error 400 — mismo archivo de creación: title vacío/solo espacios →
+400 con field: "title". Se añaden en el mismo archivo, sin costo extra, los casos
+de title > 120 chars, status/priority fuera de enum y due_date inexistente
+(ej. 2026-02-30).
+
+Tests adicionales no obligatorios pero recomendados para cubrir edge cases de la spec:
+tasks.crud.test.js (404 en GET/PUT/PATCH/DELETE sobre id inexistente, DELETE repetido,
+id inmutable vía body) y los unitarios de taskValidator, queryValidator y
+taskStatsService (arreglo vacío → ceros; done vencida no cuenta).
+
+Variables de entorno
+
+.env.example con SUPABASE_URL, SUPABASE_KEY, PORT=3000 como placeholders.
+config/env.js carga dotenv una vez, valida que las variables obligatorias existan
+.env.example con SUPABASE_URL, SUPABASE_KEY, PORT=3000 como placeholders.
+config/env.js carga dotenv una vez, valida que las variables obligatorias existan
+(lanza error descriptivo si falta alguna) y es la única fuente que el resto de módulos
+importa. Para tests, un entorno dummy se carga en jest.config.js (setupFiles) antes
+de importar cualquier módulo de la app, así los tests no requieren credenciales reales
+ni red.
+
+Dependencias
+
+- Producción: express, @supabase/supabase-js, dotenv, cors.
+- Desarrollo: jest, supertest, nodemon.
+- Scripts: start (server.js), dev (nodemon), test (jest --runInBand).
+- Instalación y ejecución con pnpm (pnpm install, pnpm start, pnpm dev, pnpm test).
+package.json debe declarar packageManager: "pnpm@<version>" para que quede explícito.
+
+README.md — secciones
+
+Título/descripción; stack; requisitos previos; configuración de Supabase paso a paso
+(crear proyecto, ejecutar db/schema.sql en el SQL Editor, obtener credenciales, nota
+sobre desactivar/ajustar Row Level Security ya que no hay auth); variables de entorno;
+instalación con pnpm (pnpm install, con nota de instalar pnpm si no está presente:
+npm install -g pnpm); ejecución local (pnpm start / pnpm dev); ejecución de tests
+(pnpm test, aclarando que mockean Supabase y no requieren red); referencia completa de la API
+(método, ruta, body/query, códigos de respuesta, ejemplo); sección de decisiones de
+diseño (PATCH vacío, criterio de vencida, tareas sin fecha al ordenar, nivel de mock
+en tests, validación a mano); estructura del proyecto.
+
+Orden de ejecución
+
+1. package.json + scripts.
+2. Verificar si pnpm está instalado (pnpm --version); si no, instalarlo
+(npm install -g pnpm). Instalar dependencias con pnpm install (prod y dev).
+3. .gitignore, .env.example, .env.
+4. db/schema.sql (el usuario lo ejecuta manualmente en Supabase).
+5. config/env.js, lib/supabaseClient.js.
+6. utils/ApiError.js, utils/dateUtils.js.
+7. repositories/taskRepository.js (5 funciones de dominio).
+8. validators/taskValidator.js, validators/queryValidator.js.
+9. services/taskStatsService.js, services/taskService.js.
+10. controllers/taskController.js, routes/taskRoutes.js (orden de rutas correcto).
+11. middlewares/errorHandler.js (+ opcional notFoundHandler).
+12. src/app.js (JSON parser, cors, rutas, errorHandler al final), src/server.js.
+13. jest.config.js + setup de entorno dummy para tests.
+14. Tests unitarios.
+15. Tests de integración (Supertest + mock de taskRepository).
+16. Ejecutar npm test completo y corregir hasta que todo pase.
+17. Escribir README.md; actualizar CLAUDE.md con comandos y arquitectura reales.
+18. (Manual, opcional) Levantar contra un Supabase real y probar endpoints con una
+herramienta HTTP.
+
+Archivos críticos
+
+- src/repositories/taskRepository.js
+- src/services/taskService.js
+- src/validators/taskValidator.js
+- src/services/taskStatsService.js
+- db/schema.sql
+
+Verificación
+
+- pnpm test — deben pasar todos los tests (mínimo los 3 requeridos por la spec, más
+los adicionales de edge cases), sin red ni credenciales reales.
+- Levantar el servidor (pnpm dev) contra un proyecto Supabase real ya configurado
+con db/schema.sql, y probar manualmente con curl/Postman: crear tarea, listar,
+filtrar por status, ordenar por due_date, consultar /tasks/stats, actualizar,
+eliminar dos veces (verificar 404 en la segunda), y los edge cases de la spec
+(title vacío, due_date inválido, status fuera de enum).
+- Revisar que el README permita, siguiendo solo sus instrucciones, clonar, configurar
+Supabase, instalar dependencias y levantar el proyecto sin conocimiento previo.
+
+Plan aprobado. Empiezo la implementación siguiendo el orden definido.
